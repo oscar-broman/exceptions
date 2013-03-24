@@ -1,5 +1,5 @@
 #if !defined MAX_CATCH_STACK
-  #define MAX_CATCH_STACK 128
+	#define MAX_CATCH_STACK 128
 #endif
 
 #if !defined MAX_EXCEPTION_MESSAGE
@@ -7,10 +7,10 @@
 #endif
 
 #define try \
-	for (new __try = 1; __try && TryException() && __try && ((__try = 0) || (__try + 1)); __try = 0)
+	for (; !TryException(); TryExceptionEnd())
 
 #define catch%1(%2) \
-	for (new %2[E_EXCEPTION], __catch = 1; __catch && CatchException(%2); __catch = 0)
+	for (new %2[E_EXCEPTION]; CatchException(%2); CatchExceptionEnd())
 
 enum E_CATCH_STACK {
 	FRM,
@@ -28,7 +28,9 @@ static
 	     s_CatchStack[MAX_CATCH_STACK][E_CATCH_STACK],
 	     s_Exception[E_EXCEPTION],
 	     s_CST = -1,
-	bool:s_ExceptionThrown = false
+	bool:s_ExceptionThrown = false,
+	bool:s_SkipNextTry = false,
+	bool:s_SkipNextCatch = false
 ;
 
 stock ThrowException(const message[], code = 0) {
@@ -58,12 +60,17 @@ stock ThrowException(const message[], code = 0) {
 	#emit SCTRL 2
 	#emit LOAD.pri s_stk
 	#emit SCTRL 4
-	#emit CONST.pri 0
 	#emit LOAD.pri s_cip
 	#emit SCTRL 6
 }
 
 stock TryException() {
+	if (s_SkipNextTry) {
+		s_SkipNextTry = false;
+		
+		return 1;
+	}
+	
 	s_CST += 1;
 	
 	assert s_CST < MAX_CATCH_STACK;
@@ -91,10 +98,20 @@ stock TryException() {
 	s_CatchStack[s_CST][STK] = stk + 12 + 16;
 	s_CatchStack[s_CST][CIP] = cip;
 	
-	return 1;
+	return 0;
+}
+
+stock TryExceptionEnd() {
+	s_SkipNextTry = true;
 }
 
 stock CatchException(e[E_EXCEPTION]) {
+	if (s_SkipNextCatch) {
+		s_SkipNextCatch = false;
+		
+		return 0;
+	}
+	
 	e[Code] = s_Exception[Code];
 	strunpack(e[Message], s_Exception[Message], MAX_EXCEPTION_MESSAGE);
 	
@@ -105,8 +122,12 @@ stock CatchException(e[E_EXCEPTION]) {
 	if (s_ExceptionThrown) {
 		s_ExceptionThrown = false;
 		
-		return true;
+		return 1;
 	}
 	
-	return false;
+	return 0;
+}
+
+stock CatchExceptionEnd() {
+	s_SkipNextCatch = true;
 }
