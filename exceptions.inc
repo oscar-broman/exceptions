@@ -174,7 +174,7 @@ public OnRuntimeError(code) {
 	}
 	
 	if (funcidx(!"Exceptions_OnRuntimeError") != -1) {
-		return CallLocalFunction(!"Exceptions_OnRuntimeError", !"i", code);
+		CallLocalFunction(!"Exceptions_OnRuntimeError", !"i", code);
 	}
 	
 	ThrowError(msg);
