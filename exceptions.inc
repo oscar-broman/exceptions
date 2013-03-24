@@ -1,3 +1,5 @@
+#include <a_samp>
+
 #if !defined MAX_CATCH_STACK
 	#define MAX_CATCH_STACK 128
 #endif
