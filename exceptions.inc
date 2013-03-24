@@ -33,14 +33,14 @@ static
 	bool:s_SkipNextCatch = false
 ;
 
-stock ThrowException(const message[], code = 0) {
+stock ThrowError(const message[], code = 0) {
 	s_ExceptionThrown = true;
 	
 	if (s_CST == -1) {
 		printf("Uncaught exception: %s", message);
 		
-		// AMX_ERR_NATIVE
-		#emit HALT 10
+		// AMX_ERR_EXIT
+		#emit HALT 1
 	}
 	
 	s_Exception[Code] = code;
