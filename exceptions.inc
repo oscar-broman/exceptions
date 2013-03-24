@@ -167,7 +167,7 @@ public OnRuntimeError(code) {
 		/* AMX_ERR_GENERAL   */ "General error (unknown or unspecific error)"
 	};
 	
-	new msg[128];
+	static msg[128];
 	
 	if (0 <= code < sizeof(sc_messages)) {
 		format(msg, sizeof(msg), "runtime error %d: %s", code, sc_messages[code]);
