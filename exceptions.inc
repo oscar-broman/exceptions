@@ -131,3 +131,59 @@ stock CatchException(e[E_EXCEPTION]) {
 stock CatchExceptionEnd() {
 	s_SkipNextCatch = true;
 }
+
+forward OnRuntimeError(code);
+public OnRuntimeError(code) {
+	static const sc_messages[28][54] = {
+		/* AMX_ERR_NONE      */ "None",
+		/* AMX_ERR_EXIT      */ "Forced exit",
+		/* AMX_ERR_ASSERT    */ "Assertion failed",
+		/* AMX_ERR_STACKERR  */ "Stack/heap collision (insufficient stack size)",
+		/* AMX_ERR_BOUNDS    */ "Array index out of bounds",
+		/* AMX_ERR_MEMACCESS */ "Invalid memory access",
+		/* AMX_ERR_INVINSTR  */ "Invalid instruction",
+		/* AMX_ERR_STACKLOW  */ "Stack underflow",
+		/* AMX_ERR_HEAPLOW   */ "Heap underflow",
+		/* AMX_ERR_CALLBACK  */ "No (valid) native function callback",
+		/* AMX_ERR_NATIVE    */ "Native function failed",
+		/* AMX_ERR_DIVIDE    */ "Divide by zero",
+		/* AMX_ERR_SLEEP     */ "sleep mode",
+		/* 13 */                "reserved",
+		/* 14 */                "reserved",
+		/* 15 */                "reserved",
+		/* AMX_ERR_MEMORY    */ "Out of memory",
+		/* AMX_ERR_FORMAT    */ "Invalid/unsupported P-code file format",
+		/* AMX_ERR_VERSION   */ "File is for a newer version of the AMX",
+		/* AMX_ERR_NOTFOUND  */ "File or function is not found",
+		/* AMX_ERR_INDEX     */ "Invalid index parameter (bad entry point)",
+		/* AMX_ERR_DEBUG     */ "Debugger cannot run",
+		/* AMX_ERR_INIT      */ "AMX not initialized (or doubly initialized)",
+		/* AMX_ERR_USERDATA  */ "Unable to set user data field (table full)",
+		/* AMX_ERR_INIT_JIT  */ "Cannot initialize the JIT",
+		/* AMX_ERR_PARAMS    */ "Parameter error",
+		/* AMX_ERR_DOMAIN    */ "Domain error, expression result does not fit in range",
+		/* AMX_ERR_GENERAL   */ "General error (unknown or unspecific error)"
+	};
+	
+	new msg[128];
+	
+	if (0 <= code < sizeof(sc_messages)) {
+		format(msg, sizeof(msg), "runtime error %d: %s", code, sc_messages[code]);
+	} else {
+		format(msg, sizeof(msg), "runtime error %d", code);
+	}
+	
+	if (funcidx(!"Exceptions_OnRuntimeError") != -1) {
+		return CallLocalFunction(!"Exceptions_OnRuntimeError", !"i", code);
+	}
+	
+	ThrowError(msg);
+}
+
+#if defined _ALS_OnRuntimeError
+	#undef OnRuntimeError
+#else
+	#define _ALS_OnRuntimeError
+#endif
+
+#define OnRuntimeError Exceptions_OnRuntimeError
