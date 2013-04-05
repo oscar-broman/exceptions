@@ -3,14 +3,31 @@
 #tryinclude <amx_assembly\phys_memory>
 #tryinclude <amx_assembly\asm>
 
-#if !defined MAX_CATCH_STACK
-	#define MAX_CATCH_STACK 128
+// Max number of try statements
+#if !defined MAX_TRY_STATEMENTS
+	const MAX_TRY_STATEMENTS = 512;
 #endif
 
+// Max nested try statements during runtime
+#if !defined MAX_CONTEXT_STACK
+	const MAX_CONTEXT_STACK = 128;
+#endif
+
+// Max size of an exception message
 #if !defined MAX_EXCEPTION_MESSAGE
-	#define MAX_EXCEPTION_MESSAGE 256
+	const MAX_EXCEPTION_MESSAGE = 256;
 #endif
 
+// Still use e_asserts if compiled with -d0
+#if !debug && defined EXCEPTIONS_ASSERT_ANYWAY
+	#define e_assert%1; \
+		if (!(%1)) { print(!"An assertion failed somewhere. That's all I know. " \
+			                "Compile with -d2 and use crashdetect for more information."); exit; }
+#else
+	#define e_assert assert
+#endif
+
+// Make sure we don't have an outdated version of amx_assembly
 #if !defined _inc_opcode
 	#error The amx_assembly library is required, get it here: http:/\
 	                                                                /goo.gl/qEfLm
@@ -21,54 +38,71 @@
 	                                                                      /goo.gl/qEfLm
 #endif
 
+
+// Entry points for the new statements
 #define try \
-	if (!g_@eInitialized) InitExceptions(); for (new __r = __r | _@eTRY_MAGIC1 | _@eTRY_MAGIC2 | _@eTRY_MAGIC3 | _@eTRY_MAGIC4, __e = -1; __r && ((__e = TryStart(!_@eTRUE, !_@eFALSE)) || _@eTRUE) || TryEnd(__e); __r = 0)
+	if (!g_@eInitialized) InitExceptions(); for (new __r = __r | _@eTRY_MAGIC1 | _@eTRY_MAGIC2; __r && TryStart(!_@eTRUE, !_@eFALSE, _@eTRY_MAGIC3); TryEnd(), __r = 0)
 
 #define catch%1(%2) \
-	if (_@eTRUE || _@eCATCH_MAGIC) for (new %2[E_EXCEPTION]; !%2[Caught] && CatchException(%2); %2[Caught] = true, CatchEnd())
+	if (_@eCATCH_MAGIC | _@eTRUE) for (new %2[E_EXCEPTION]; !%2[Caught] && CatchStart(%2); %2[Caught] = true, CatchEnd())
 
 #define finally \
-	if (_@eTRUE || _@eFINALLY_MAGIC) for (new __f = 1; __f; FinallyEnd(), __f = 0)
+	if (_@eFINALLY_MAGIC | _@eTRUE) for (new __f = FinallyStart(); __f; FinallyEnd(), __f = 0)
 
-// Used to identify try/catch/finally statements in the AMX instructions
+
+// Used to distinguish the statements among AMX instructions
 const _@eTRY_MAGIC1    = 0x026A57FD;
 const _@eTRY_MAGIC2    = 0xABD8C2BA;
 const _@eTRY_MAGIC3    = 0xD3120889;
-const _@eTRY_MAGIC4    = 0xFCAB063E;
 const _@eCATCH_MAGIC   = 0x4CD52FB1;
 const _@eFINALLY_MAGIC = 0xB408FAA2;
 
-// Used to prevent redundant test warnings
-stock _@eTRUE          = 1;
-stock _@eFALSE         = 0;
+
+// Prevent redundant test warnings
+stock _@eTRUE  = true;
+stock _@eFALSE = false;
+
 
 // Will be provided in the catch statement
 enum E_EXCEPTION {
-	     Message[MAX_EXCEPTION_MESSAGE],
-	     Code,
-	bool:Caught
+	Message[MAX_EXCEPTION_MESSAGE],
+	Code,
+	Caught
 }
 
-enum E_TRY_INFO {
+// Context of a try statement
+enum E_TRY_CONTEXT {
+	// FRM, HEA, STK are set to what they were before the try block
 	FRM,
 	HEA,
 	STK,
-	CIP,
-	Try
+	// The index in s_TryStatements
+	TryIdx,
+	// Was there a return statement in try or catch?
+	ShouldReturn,
+	ReturnValue,
+	// The current block we're in
+	CurrentBlock
 }
 
+enum {
+	CurrentBlockTry,
+	CurrentBlockCatch,
+	CurrentBlockFinally
+}
+
+// Information about each try statement
 enum E_TRY_STATEMENT {
-	// Memory address in COD
-	Try_Start,
+	// Memory addresses in COD
 	Try_End,
-	Catch_Start,
+	HasCatch,
 	Catch_End,
-	Finally_Start,
+	HasFinally,
 	Finally_End
 }
 
+
 // Number of operands an opcode takes
-// CASETBL is a special case; it doesn't have a fixed number of operands
 static const sc_OpcodeOperands[Opcode:138] = {
 	0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
 	0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1,
@@ -79,151 +113,207 @@ static const sc_OpcodeOperands[Opcode:138] = {
 	1, 0
 };
 
+
 static
-	s_TryStatements[2048][E_TRY_STATEMENT],
-	s_ReturnHooks[sizeof(s_TryStatements)][AsmContext],
-	s_ReturnHookCode[sizeof(s_TryStatements)][64],
-	s_TryStackIndex = -1,
-	s_TryStack[128][E_TRY_INFO],
+	s_TryStatements[MAX_TRY_STATEMENTS][E_TRY_STATEMENT],
 	s_NumTryStatements = 0,
-	s_HasException = false,
-	s_LastException[E_EXCEPTION],
-	s_ShouldReturn = false,
-	s_ReturnValue
-;
 	
+	s_ContextStack[MAX_CONTEXT_STACK][E_TRY_CONTEXT],
+	// Current context index
+	s_CTX = -1,
+	
+	// Tailored functions for hooked return statements in try and catch
+	s_ReturnHooks[MAX_TRY_STATEMENTS][AsmContext],
+	s_ReturnHookCode[MAX_TRY_STATEMENTS][20],
+	
+	// The exception that was thrown
+	s_LastException[E_EXCEPTION],
+	s_HasException = false
+;
+
 new
 	g_@eInitialized = false
 ;
 
+// Scan the AMX for try statements and do some modifications to it
+stock InitExceptions();
+// Invoked before try
+stock TryStart(frm, stk, try_idx);
+// Invoked after try
+stock TryEnd();
+// Invoked before catch
+stock CatchStart(e[E_EXCEPTION]);
+// Invoked after catch
+stock CatchEnd();
+// Invoked before finally
+stock FinallyStart();
+// Invoked after finally
+stock FinallyEnd();
+// Getter for s_CTX
+stock GetTryStackIndex();
+// Create and throw an exception
+stock ThrowError(const message[], code = -1);
+// Called when an exception happens outside of try
 forward OnUncaughtException(e[E_EXCEPTION]);
-static Initialize();
+// Used when hooking return statements
+static ReturnHook(retval);
+// Restore the frame, stack, and heap the way it was before the try statement,
+// then jump to the specified position
+static JumpToContext(_cip, pop = false);
+// Return from the function containing the try statement
+static DoReturn(_retval);
+// Increment s_CTX
+static PushContext();
+// Decrement s_CTX
+static PopContext();
+// Read and relocate an opcode
+static Opcode:ReadOpcode(address);
+// Read the operand for the current opcode, assuming it has one
+static ReadOperand(address, end = 0);
+// Write an opcode and its operand (if it has one)
+static WriteOpcode(address, Opcode:opcode, operand = 0);
+// Write an operand
+static WriteOperand(address, operand);
+// Find and store the next opcode
+static FindNextOpcode(&address, &Opcode:opcode, end = 0);
+// Find a specific opcode
+// Modifies address only on success
+static FindOpcode(&address, Opcode:opcode, end = 0);
+// Find a specific opcode and operand pair
+// Modifies address only on success
+static FindOpcodeWithOperand(&address, Opcode:opcode, operand, end = 0);
 
-stock InitExceptions() {
-	Initialize();
-}
-
-stock GetTryStackIndex() {
-	return s_TryStackIndex;
-}
-
-stock TryStart(frm, stk, ...) {
-	print("TryStart");
-	if (!g_@eInitialized) Initialize();
+stock TryStart(frm, stk, try_idx) {
+	e_assert g_@eInitialized;
+	e_assert 0 <= try_idx < s_NumTryStatements;
 	
-	s_ShouldReturn = false;
-	
-	new try_idx;
-	
-	// Adjust to skip the for-loop's local variables (__r and __e)
-	stk += 8;
-	
-	// Third argument
-	#emit LOAD.S.pri 20
-	#emit STOR.S.pri try_idx
-	
-	new cip, hea;
+	// Skip the for-loop's local variable (__r) and the first pushed argument
+	stk += 4 + 4;
 	
 	// Get the heap pointer
+	new hea;
 	#emit LCTRL 2
 	#emit STOR.S.pri hea
 	
-	// Get the return address
-	#emit LOAD.S.pri 4
-	#emit STOR.S.pri cip
+	PushContext();
 	
-	new i = ++s_TryStackIndex;
+	s_ContextStack[s_CTX][FRM] = frm;
+	s_ContextStack[s_CTX][HEA] = hea;
+	s_ContextStack[s_CTX][STK] = stk;
+	s_ContextStack[s_CTX][TryIdx] = try_idx;
+	s_ContextStack[s_CTX][ShouldReturn] = false;
+	s_ContextStack[s_CTX][CurrentBlock] = CurrentBlockTry;
 	
-	s_TryStack[i][FRM] = frm;
-	s_TryStack[i][HEA] = hea;
-	s_TryStack[i][STK] = stk;
-	s_TryStack[i][CIP] = cip;
-	
-	s_TryStack[i][Try] = try_idx;
-	
-	return i;
+	return 1;
 }
 
-stock TryEnd(idx) {
-	#pragma unused idx
+stock TryEnd() {
+	e_assert g_@eInitialized;
+	e_assert s_CTX > -1;
 	
-	// If there's no try statement, decrement s_TryStackIndex
-	if (!s_TryStatements[s_TryStack[idx][Try]][Catch_Start]) {
-		s_TryStackIndex--;
+	new try_idx = s_ContextStack[s_CTX][TryIdx];
+	
+	e_assert 0 <= try_idx < s_NumTryStatements;
+	
+	// If there's no catch or finally after this, pop the context
+	if (!s_TryStatements[try_idx][HasCatch] && !s_TryStatements[try_idx][HasFinally]) {
+		s_HasException = false;
+		
+		PopContext();
 	}
 	
-	print("TryEnd");
-	
-	return 0;
+	return 1;
 }
 
-static TryReturn(try_idx, retval) {
-	print("TryReturn");
+stock CatchStart(e[E_EXCEPTION]) {
+	e_assert g_@eInitialized;
+	e_assert s_CTX > -1;
 	
-	s_ShouldReturn = true;
-	s_ReturnValue = retval;
+	// Nothing more to do here
+	if (!s_HasException) {
+		CatchEnd();
+		
+		return 0;
+	}
 	
-	// Restore the stack, frame, and heap then jump to the end of the try statement
-	static frm, hea, stk, cip;
+	s_HasException = false;
+	s_ContextStack[s_CTX][CurrentBlock] = CurrentBlockCatch;
 	
-	new i = s_TryStackIndex;
-
-	frm = s_TryStack[i][FRM];
-	hea = s_TryStack[i][HEA];
-	stk = s_TryStack[i][STK];
-	cip = s_TryStatements[s_TryStack[i][Try]][Try_End];
+	// Copy the last exception's values to e
+	strunpack(e[Message], s_LastException[Message], MAX_EXCEPTION_MESSAGE);
+	e[Code] = s_LastException[Code];
+	e[Caught] = s_LastException[Caught];
 	
-	s_TryStackIndex--;
-	
-	// Restore the context
-	#emit LOAD.pri frm
-	#emit SCTRL 5
-	#emit LOAD.pri hea
-	#emit SCTRL 2
-	#emit LOAD.pri stk
-	#emit SCTRL 4
-	#emit LOAD.pri cip
-	#emit SCTRL 6
-	
-	return 0;
+	return 1;
 }
 
 stock CatchEnd() {
-	s_TryStackIndex--;
+	e_assert g_@eInitialized;
+	e_assert s_CTX > -1;
 	
-	return 0;
+	new try_idx = s_ContextStack[s_CTX][TryIdx];
+	
+	e_assert 0 <= try_idx < s_NumTryStatements;
+	
+	// If there's no finally after this, pop the context
+	if (!s_TryStatements[try_idx][HasFinally]) {
+		if (s_ContextStack[s_CTX][ShouldReturn]) {
+			DoReturn(s_ContextStack[s_CTX][ReturnValue]);
+		} else {
+			PopContext();
+		}
+	}
+	
+	return 1;
+}
+
+stock FinallyStart() {
+	e_assert g_@eInitialized;
+	e_assert s_CTX > -1;
+	
+	if (s_HasException) {
+		s_HasException = false;
+	}
+	
+	s_ContextStack[s_CTX][CurrentBlock] = CurrentBlockFinally;
+	
+	return 1;
 }
 
 stock FinallyEnd() {
-	// Was there a return statement in the try/catch blocks?
-	if (s_ShouldReturn) {
-		printf("FinallyEnd(%d)", s_ReturnValue);
-		// Get the previous frame
-		#emit LOAD.S.pri 0
-		// Make the previous frame the current one
-		#emit SCTRL 5
-		// Also set the stack to the current one
-		#emit SCTRL 4
-		// Load the return value
-		#emit LOAD.pri s_ReturnValue
-		// Return!
-		#emit RETN
+	e_assert g_@eInitialized;
+	e_assert s_CTX > -1;
+	
+	new try_idx = s_ContextStack[s_CTX][TryIdx];
+	
+	e_assert 0 <= try_idx < s_NumTryStatements;
+	
+	if (s_ContextStack[s_CTX][ShouldReturn]) {
+		DoReturn(s_ContextStack[s_CTX][ReturnValue]);
 	} else {
-		printf("FinallyEnd()");
+		JumpToContext(s_TryStatements[try_idx][Finally_End], true);
 	}
+	
+	return 1;
 }
 
-stock ThrowError(const message[], code = 0) {
-	print("ThrowError");
-	if (!g_@eInitialized) Initialize();
+stock GetTryStackIndex() {
+	return s_CTX;
+}
+
+stock ThrowError(const message[], code = -1) {
+	e_assert g_@eInitialized;
+	e_assert s_CTX >= -1;
+	
+	new try_idx = s_ContextStack[s_CTX][TryIdx];
+	
+	e_assert 0 <= try_idx < s_NumTryStatements;
 	
 	strunpack(s_LastException[Message], message, MAX_EXCEPTION_MESSAGE);
-	
 	s_LastException[Code] = code;
 	s_LastException[Caught] = false;
 	
-	// Not inside a try block?
-	if (s_TryStackIndex < 0) {
+	if (s_CTX == -1) {
 		new ignore = false;
 		
 		if (funcidx(!"OnUncaughtException") != -1) {
@@ -238,121 +328,109 @@ stock ThrowError(const message[], code = 0) {
 	} else {
 		s_HasException = true;
 		
-		// Restore the stack, frame, and heap then jump to the end of the try statement
-		static frm, hea, stk, cip;
-		new i = s_TryStackIndex;
+		JumpToContext(s_TryStatements[try_idx][Try_End]);
+	}
+}
+
+static ReturnHook(retval) {
+	e_assert g_@eInitialized;
+	e_assert s_CTX > -1;
 	
-		frm = s_TryStack[i][FRM];
-		hea = s_TryStack[i][HEA];
-		stk = s_TryStack[i][STK];
-		cip = s_TryStatements[s_TryStack[i][Try]][Try_End];
-		
-		// If there's no catch statement, decrement s_TryStackIndex
-		if (!s_TryStatements[s_TryStack[i][Try]][Catch_Start]) {
-			s_TryStackIndex--;
+	new try_idx = s_ContextStack[s_CTX][TryIdx];
+	
+	e_assert 0 <= try_idx < s_NumTryStatements;
+	
+	s_ContextStack[s_CTX][ReturnValue] = retval;
+	
+	switch (s_ContextStack[s_CTX][CurrentBlock]) {
+		case CurrentBlockTry: {
+			// Should we return now?
+			if (!s_TryStatements[try_idx][HasCatch] && !s_TryStatements[try_idx][HasFinally]) {
+				DoReturn(retval);
+			} else {
+				s_ContextStack[s_CTX][ShouldReturn] = true;
+				
+				JumpToContext(s_TryStatements[try_idx][Try_End]);
+			}
 		}
 		
-		// Restore the context
-		#emit LOAD.pri frm
-		#emit SCTRL 5
-		#emit LOAD.pri hea
-		#emit SCTRL 2
-		#emit LOAD.pri stk
-		#emit SCTRL 4
-		#emit LOAD.pri cip
-		#emit SCTRL 6
-	}
-}
-
-stock CatchException(e[E_EXCEPTION]) {
-	if (!g_@eInitialized) Initialize();
-	
-	if (!s_HasException) {
-		print("CatchException? no");
-		return 0;
-	}
-
-	print("CatchException? yes");
-	
-	s_HasException = false;
-	
-	strunpack(e[Message], s_LastException[Message], MAX_EXCEPTION_MESSAGE);
-	
-	e[Code] = s_LastException[Code];
-	e[Caught] = s_LastException[Caught];
-	
-	return 1;
-}
-
-// Read and relocate an opcode
-static Opcode:ReadOpcode(address) {
-	assert address < 0;
-	
-	new Opcode:opcode = Opcode:ReadAmxMemory(address);
-	opcode = UnrelocateOpcode(opcode);
-	
-	assert opcode >= OP_NONE && _:opcode < _:NUM_OPCODES;
-	
-	return opcode;
-}
-
-static Opcode:FindNextOpcode(&address) {
-	new Opcode:opcode = ReadOpcode(address);
-	
-	address += 4;
-	
-	if (opcode == OP_CASETBL) {
-		address += 8 + 8 * ReadAmxMemory(address);
-	} else {
-		assert sc_OpcodeOperands[opcode] != -1;
+		case CurrentBlockCatch: {
+			// Should we return now?
+			if (!s_TryStatements[try_idx][HasFinally]) {
+				DoReturn(retval);
+			} else {
+				s_ContextStack[s_CTX][ShouldReturn] = true;
+				
+				JumpToContext(s_TryStatements[try_idx][Catch_End]);
+			}
+		}
 		
-		address += 4 * sc_OpcodeOperands[opcode];
+		case CurrentBlockFinally: {
+			DoReturn(retval);
+		}
 	}
 	
-	if (address >= 0) {
-		return OP_NONE;
-	}
-	
-	return ReadOpcode(address);
+	return 0;
 }
 
-static Initialize() {
-	if (g_@eInitialized) return;
+static JumpToContext(_cip, pop = false) {
+	e_assert g_@eInitialized;
+	e_assert s_CTX > -1;
+	
+	static frm, hea, stk, cip;
+	
+	frm = s_ContextStack[s_CTX][FRM];
+	hea = s_ContextStack[s_CTX][HEA];
+	stk = s_ContextStack[s_CTX][STK];
+	cip = _cip;
+	
+	if (pop) {
+		PopContext();
+	} else {}
+	
+	// Restore the context and jump
+	#emit LOAD.pri frm
+	#emit SCTRL 5
+	#emit LOAD.pri hea
+	#emit SCTRL 2
+	#emit LOAD.pri stk
+	#emit SCTRL 4
+	#emit LOAD.pri cip
+	#emit SCTRL 6
+}
+
+static DoReturn(_retval) {
+	e_assert g_@eInitialized;
+	e_assert s_CTX > -1;
+	
+	// Use static so they can be accessed after the frame has been modified
+	static frm, hea, retval;
+	
+	frm = s_ContextStack[s_CTX][FRM];
+	hea = s_ContextStack[s_CTX][HEA];
+	retval = _retval;
+	
+	PopContext();
+	
+	// Set the heap
+	#emit LOAD.pri hea
+	#emit SCTRL 2
+	// Set the frame
+	#emit LOAD.pri frm
+	// Make it the current one
+	#emit SCTRL 5
+	// Also set the stack to its value
+	#emit SCTRL 4
+	// Load the return value
+	#emit LOAD.pri retval
+	// Return!
+	#emit RETN
+}
+
+stock InitExceptions() {
+	e_assert !g_@eInitialized;
 	
 	g_@eInitialized = true;
-	
-	new try_pattern[12];
-	
-	// Relocate needed opcodes
-	new op_const_alt = _:RelocateOpcode(OP_CONST_ALT);
-	new op_or        = _:RelocateOpcode(OP_OR);
-	new op_not       = _:RelocateOpcode(OP_NOT);
-	new op_nop       = _:RelocateOpcode(OP_NOP);
-	new op_load_pri  = _:RelocateOpcode(OP_LOAD_PRI);
-	new op_push_pri  = _:RelocateOpcode(OP_PUSH_PRI);
-	new op_push_c    = _:RelocateOpcode(OP_PUSH_C);
-	new op_lctrl     = _:RelocateOpcode(OP_LCTRL);
-	new op_zero_pri  = _:RelocateOpcode(OP_ZERO_PRI);
-	new op_jump      = _:RelocateOpcode(OP_JUMP);
-	new op_jzer      = _:RelocateOpcode(OP_JZER);
-	new op_stack     = _:RelocateOpcode(OP_STACK);
-	
-	// There's a bug in an earlier version causing issues on Windows
-	if (op_const_alt == 0) {
-		print(!"\nERROR: Please get the latest version of the amx_assembly files: http://goo.gl/qEfLm\n");
-		
-		exit;
-	}
-	
-	// This should be inside the try macro's for loop
-	try_pattern[0] = op_const_alt; try_pattern[1] = _@eTRY_MAGIC1;
-	try_pattern[2] = op_or;
-	try_pattern[3] = op_const_alt; try_pattern[4] = _@eTRY_MAGIC2;
-	try_pattern[5] = op_or;
-	try_pattern[6] = op_const_alt; try_pattern[7] = _@eTRY_MAGIC3;
-	try_pattern[8] = op_or;
-	try_pattern[9] = op_const_alt; try_pattern[10] = _@eTRY_MAGIC4;
-	try_pattern[11] = op_or;
 	
 	// Gather some info about the AMX
 	new hdr[AMX_HDR], base, cod, dat;
@@ -364,183 +442,293 @@ static Initialize() {
 	dat = hdr[AMX_HDR_DAT];
 	
 	new cod_start = cod - dat;
-	new cod_end = cod_start + dat - cod;
 	new address = cod_start;
 	
 	// Get the addresses of some functions we'll need
-	new addr_TryStart, addr_TryReturn, addr_CatchException, addr_CatchEnd;
+	new addr_TryStart, addr_TryEnd, addr_ReturnHook, addr_CatchEnd, addr_FinallyEnd;
 
 	#emit CONST.pri   TryStart
 	#emit STOR.S.pri  addr_TryStart
-	#emit CONST.pri   TryReturn
-	#emit STOR.S.pri  addr_TryReturn
-	#emit CONST.pri   CatchException
-	#emit STOR.S.pri  addr_CatchException
+	#emit CONST.pri   TryEnd
+	#emit STOR.S.pri  addr_TryEnd
+	#emit CONST.pri   ReturnHook
+	#emit STOR.S.pri  addr_ReturnHook
 	#emit CONST.pri   CatchEnd
 	#emit STOR.S.pri  addr_CatchEnd
+	#emit CONST.pri   FinallyEnd
+	#emit STOR.S.pri  addr_FinallyEnd
 	
 	// Relocate them (so they can be used for AMX instructions)
 	addr_TryStart += base + cod;
-	addr_TryReturn += base + cod;
-	addr_CatchException += base + cod;
+	addr_TryEnd += base + cod;
+	addr_ReturnHook += base + cod;
 	addr_CatchEnd += base + cod;
+	addr_FinallyEnd += base + cod;
 	
-	// Read the first opcode
-	new Opcode:opcode = ReadOpcode(address);
+	new operand, found;
 	
-	// Scan the code top to bottom
-	while (address < cod_end) {
-		// Could be a try statement
-		if (opcode == OP_CONST_ALT) {
-			new match = true, start = address;
+	// Look for try statements
+	while (FindOpcodeWithOperand(address, OP_CONST_ALT, _@eTRY_MAGIC1)
+	    && FindOpcodeWithOperand(address, OP_CONST_ALT, _@eTRY_MAGIC2)) {
+		new try_idx = s_NumTryStatements++;
+		new start = address;
+		
+		found = FindOpcode(address, OP_CALL);
+		e_assert found;
+		e_assert ReadOperand(address) == addr_TryEnd;
+		
+		// Search for TryStart(!_@eTRUE, !_@eFALSE, _@eTRY_MAGIC3)
+		found = FindOpcodeWithOperand(address, OP_PUSH_C, _@eTRY_MAGIC3);
+		
+		// Compiled with -O0
+		if (!found) {
+			found = FindOpcodeWithOperand(address, OP_CONST_PRI, _@eTRY_MAGIC3);
+			e_assert found;
 			
-			for (new i = 0; i < sizeof(try_pattern); i++) {
-				if (ReadAmxMemory(address + i * 4) != try_pattern[i]) {
-					match = false;
-					
-					break;
-				}
-			}
-			
-			// It's a try statement
-			if (match) {
-				new i = s_NumTryStatements++;
-				
-				s_TryStatements[i][Try_Start] = address;
-				
-				// Search for this part of the try macro:
-				//   TryStart(!_@eTRUE, !_@eFALSE)
-				do {
-					opcode = FindNextOpcode(address);
-				} while (opcode != OP_CALL);
-				
-				assert ReadAmxMemory(address + 4) == addr_TryStart;
-				assert ReadAmxMemory(address - 40) == op_load_pri;
-				assert ReadAmxMemory(address - 36) == ref(_@eFALSE);
-				assert ReadAmxMemory(address - 32) == op_not;
-				assert ReadAmxMemory(address - 16) == op_not;
-				
-				// Push this try statement's index
-				WriteAmxMemory(address - 32, op_push_c);
-				WriteAmxMemory(address - 28, i);
-				
-				// Replace !_@eFALSE with the value from LCTRL 4 (STK)
-				WriteAmxMemory(address - 40, op_lctrl);
-				WriteAmxMemory(address - 36, 4);
-				WriteAmxMemory(address - 24, op_push_pri);
-				
-				// Replace !_@eTRUE with the value from LCTRL 5 (FRM)
-				WriteAmxMemory(address - 20, op_lctrl);
-				WriteAmxMemory(address - 16, 5);
-				WriteAmxMemory(address - 12, op_push_pri);
-				
-				// Push the argument count
-				WriteAmxMemory(address - 8, op_push_c);
-				WriteAmxMemory(address - 4, 3 * 4);
-				
-				// Find the end of the try block
-				assert ReadAmxMemory(address + 40) == op_zero_pri;
-				assert ReadAmxMemory(address + 44) == op_jump;
-				
-				address = ReadAmxMemory(address + 80) - base - dat;
-				address = ReadAmxMemory(address + 4) - base - dat;
-				
-				assert ReadAmxMemory(address + 8) == op_jzer;
-				
-				address = ReadAmxMemory(address + 12) - base - dat;
-				
-				new end = address;
-				
-				assert ReadAmxMemory(end) == op_stack;
-				assert ReadAmxMemory(end + 4) == 8;
-				
-				s_TryStatements[i][Try_End] = address + dat - cod + 8;
-				
-				// Look for a catch statement
-				address = end;
-				
-				if (address + 32 >= cod_end) {
-					break;
-				}
-				
-				if (ReadAmxMemory(address + 28) == _@eCATCH_MAGIC || ReadAmxMemory(address + 32) == _@eCATCH_MAGIC) {
-					do {
-						opcode = FindNextOpcode(address);
-					} while (opcode != OP_CALL);
-					
-					assert ReadAmxMemory(address + 4) == addr_CatchEnd;
-					
-					do {
-						opcode = FindNextOpcode(address);
-					} while (opcode != OP_CALL);
-					
-					assert ReadAmxMemory(address + 4) == addr_CatchException;
-					
-					// Find the end of the catch block
-					do {
-						opcode = FindNextOpcode(address);
-					} while (opcode != OP_JUMP);
-					do {
-						opcode = FindNextOpcode(address);
-					} while (opcode != OP_JZER);
-					
-					s_TryStatements[i][Catch_Start] = address + dat - cod + 8;
-					
-					end = ReadAmxMemory(address + 4) - base - dat;
-					
-					assert ReadOpcode(end) == OP_STACK;
-					
-					// Skip the STACK opcode
-					end += 8;
-					
-					// Save it
-					s_TryStatements[i][Catch_End] = end + dat - cod + 8;
-				}
-				
-				// Find return statements
-				address = start;
-				
-				new Opcode:prev_opcode = OP_NONE;
-				opcode = ReadOpcode(address);
-				
-				while (address < end) {
-					if (opcode == OP_RETN) {
-						assert prev_opcode == OP_STACK;
-						
-						// Lazily create the return hook function
-						if (!s_ReturnHooks[i][AsmContext_buffer_size]) {
-							AsmInit(s_ReturnHooks[i], s_ReturnHookCode[i]);
-							
-							// Push the return value
-							AsmEmitPushPri(s_ReturnHooks[i]);
-							// Push the try statement's index (s_TryStatements)
-							AsmEmitPushC(s_ReturnHooks[i], i);
-							// Push argument count
-							AsmEmitPushC(s_ReturnHooks[i], 8);
-							// Call TryReturn
-							AsmEmitCall(s_ReturnHooks[i], addr_TryReturn);
-						}
-						
-						// Hook the return statement
-						WriteAmxMemory(address - 8, op_nop);
-						WriteAmxMemory(address - 4, _:RelocateOpcode(OP_CALL));
-						WriteAmxMemory(address    , base + cod + AsmGetCode(s_ReturnHooks[i]));
-						
-						address += 4;
-					}
-					
-					prev_opcode = opcode;
-					opcode = FindNextOpcode(address);
-				}
-				
-				
-				// if (ReadAmxMemory(address + 28) == _@eFINALLY_MAGIC || ReadAmxMemory(address + 32) == _@eFINALLY_MAGIC) {
-				// 	
-				// 	print("found finally");
-				// }
-			}
+			WriteOpcode(address, OP_NOP);
+			address += 4;
+			WriteOpcode(address, OP_PUSH_C);
 		}
 		
-		opcode = FindNextOpcode(address);
+		// Replace _@eTRY_MAGIC3 with the value of try_idx
+		WriteOperand(address, try_idx);
+		// Replace !_@eFALSE with the value from LCTRL 4 (STK)
+		WriteOpcode(address + 8, OP_LCTRL, 4);
+		WriteOpcode(address + 16, OP_NOP);
+		// Replace !_@eTRUE with the value from LCTRL 5 (FRM)
+		WriteOpcode(address + 24, OP_LCTRL, 5);
+		WriteOpcode(address + 32, OP_NOP);
+		
+		// Find the end of the try block
+		found = FindOpcode(address, OP_CALL);
+		e_assert found;
+		e_assert ReadOperand(address) == addr_TryStart;
+		found = FindOpcode(address, OP_JUMP);
+		e_assert found;
+		found = FindOpcode(address, OP_JZER);
+		e_assert found;
+		
+		operand = ReadOperand(address);
+		
+		new end = operand - base - dat;
+		
+		e_assert ReadOpcode(end) == OP_STACK;
+		e_assert ReadOperand(end) == 4;
+		
+		// Skip the STACK opcode
+		end += 8;
+		
+		s_TryStatements[try_idx][Try_End] = operand + 8 - base - cod;
+		
+		// Look for a catch statement
+		address = end;
+		
+		if (ReadOpcode(address) == OP_BREAK) {
+			address += 4;
+		}
+		
+		if (ReadOpcode(address) == OP_LOAD_PRI && ReadOperand(address) == ref(_@eTRUE)
+		 && ReadOpcode(address + 8) == OP_CONST_ALT && ReadOperand(address + 8) == _@eCATCH_MAGIC) {
+			s_TryStatements[try_idx][HasCatch] = true;
+			
+			address += 16;
+			
+			e_assert ReadOpcode(address) == OP_OR;
+			
+			address += 4;
+			
+			// Find the end of the catch statement
+			e_assert ReadOpcode(address) == OP_JZER;
+			
+			operand = ReadOperand(address);
+			
+			end = operand - base - dat;
+			
+			// Make sure the STACK opcode from the loop is correct
+			e_assert ReadOpcode(end - 8) == OP_STACK;
+			e_assert ReadOperand(end - 8) == _:E_EXCEPTION * 4;
+			
+			s_TryStatements[try_idx][Catch_End] = operand - base - cod;
+		}
+		
+		// Look for a finally statement
+		address = end;
+		
+ 		if (ReadOpcode(address) == OP_BREAK) {
+ 			address += 4;
+ 		}
+		
+		if (ReadOpcode(address) == OP_LOAD_PRI && ReadOperand(address) == ref(_@eTRUE)
+		 && ReadOpcode(address + 8) == OP_CONST_ALT && ReadOperand(address + 8) == _@eFINALLY_MAGIC) {
+			s_TryStatements[try_idx][HasFinally] = true;
+			
+			address += 16;
+			
+			e_assert ReadOpcode(address) == OP_OR;
+			
+			address += 4;
+			
+			// Find the end of the catch statement
+			e_assert ReadOpcode(address) == OP_JZER;
+			
+			operand = ReadOperand(address);
+			
+			end = operand - base - dat;
+			
+			// Make sure the STACK opcode from the loop is correct
+			e_assert ReadOpcode(end - 8) == OP_STACK;
+			e_assert ReadOperand(end - 8) == 4;
+			
+			s_TryStatements[try_idx][Finally_End] = operand - base - cod;
+		}
+		
+		// Naked function that invokes ReturnHook
+		AsmInit(s_ReturnHooks[try_idx], s_ReturnHookCode[try_idx]);
+		// Push the return value (was set before jumping here)
+		AsmEmitPushPri(s_ReturnHooks[try_idx]);
+		// Push argument count
+		AsmEmitPushC(s_ReturnHooks[try_idx], 4);
+		// Call ReturnHook
+		AsmEmitCall(s_ReturnHooks[try_idx], addr_ReturnHook);
+		
+		// Hook RETN opcodes
+		// TODO: Hook RET opcodes
+		address = start;
+		
+		while (FindOpcode(address, OP_RETN, end)) {
+			e_assert ReadOpcode(address - 8) == OP_STACK;
+			
+			// Hook the return statement
+			WriteOpcode(address - 8, OP_NOP);
+			WriteOpcode(address - 4, OP_CALL, AsmGetCode(s_ReturnHooks[try_idx]) + base + cod);
+			
+			// Don't leave the address at an operand
+			address += 4;
+		}
+		
+		address = end;
 	}
+}
+
+static Opcode:ReadOpcode(address) {
+	new Opcode:opcode = Opcode:ReadAmxMemory(address);
+	opcode = UnrelocateOpcode(opcode);
+	
+	// Make sure it's valid
+	e_assert _:OP_NONE <= _:opcode < NUM_OPCODES;
+	
+	return opcode;
+}
+
+static ReadOperand(address, end = 0) {
+	e_assert sc_OpcodeOperands[ReadOpcode(address)] == 1;
+	e_assert address + 4 < end;
+	
+	return ReadAmxMemory(address + 4);
+}
+
+static WriteOpcode(address, Opcode:opcode, operand = 0) {
+	// Are we dealing with a valid opcode?
+	e_assert _:OP_NONE <= _:opcode < NUM_OPCODES;
+	e_assert sc_OpcodeOperands[opcode] != -1;
+	
+	new Opcode:opcode_reloc = RelocateOpcode(opcode);
+	
+	// There's a bug in an earlier version causing issues on Windows
+	if (opcode && !opcode_reloc) {
+		print(!"\nERROR: Please get the latest version of the amx_assembly files: http://goo.gl/qEfLm\n");
+		
+		exit;
+	}
+	
+	WriteAmxMemory(address, _:opcode_reloc);
+	
+	if (sc_OpcodeOperands[opcode]) {
+		WriteAmxMemory(address + 4, operand);
+	}
+}
+
+static WriteOperand(address, operand) {
+	e_assert sc_OpcodeOperands[ReadOpcode(address)] == 1;
+	
+	WriteAmxMemory(address + 4, operand);
+}
+
+static FindNextOpcode(&address, &Opcode:opcode, end = 0) {
+	new Opcode:current_opcode = ReadOpcode(address);
+	new start_address = address;
+	
+	address += 4;
+	
+	if (address >= end) {
+		address = start_address;
+		
+		return 0;
+	}
+	
+	// Case tables have dynamic operand sizes
+	if (current_opcode == OP_CASETBL) {
+		address += 8 + 8 * ReadAmxMemory(address);
+	} else {
+		// Are we dealing with a valid opcode?
+		e_assert sc_OpcodeOperands[current_opcode] != -1;
+		
+		address += 4 * sc_OpcodeOperands[current_opcode];
+	}
+	
+	// Nothing more to read
+	if (address >= end) {
+		address = start_address;
+		
+		return 0;
+	}
+	
+	opcode = ReadOpcode(address);
+	
+	return 1;
+}
+
+static FindOpcode(&address, Opcode:opcode, end = 0) {
+	new start_address = address;
+	new Opcode:current_opcode;
+	
+	while (FindNextOpcode(address, current_opcode, end)) {
+		if (current_opcode == opcode) {
+			return 1;
+		}
+	}
+	
+	// Nothing was found
+	address = start_address;
+	
+	return 0;
+}
+
+static FindOpcodeWithOperand(&address, Opcode:opcode, operand, end = 0) {
+	new start_address = address;
+	
+	while (FindOpcode(address, opcode, end)) {
+		if (ReadOperand(address, end) == operand) {
+			return 1;
+		}
+	}
+	
+	// Nothing was found
+	address = start_address;
+	
+	return 0;
+}
+
+static PushContext() {
+	e_assert s_CTX >= -1;
+	
+	s_CTX++;
+	
+	e_assert s_CTX < MAX_CONTEXT_STACK;
+}
+
+static PopContext() {
+	e_assert s_CTX > -1;
+	
+	s_CTX--;
 }
