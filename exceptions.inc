@@ -156,32 +156,32 @@ stock ThrowError(const message[], code = -1);
 // Called when an exception happens outside of try
 forward OnUncaughtException(e[E_EXCEPTION]);
 // Used when hooking return statements
-static ReturnHook(retval);
+static stock ReturnHook(retval);
 // Restore the frame, stack, and heap the way it was before the try statement,
 // then jump to the specified position
-static JumpToContext(_cip, pop = false);
+static stock JumpToContext(_cip, pop = false);
 // Return from the function containing the try statement
-static DoReturn(_retval);
+static stock DoReturn(_retval);
 // Increment s_CTX
-static PushContext();
+static stock PushContext();
 // Decrement s_CTX
-static PopContext();
+static stock PopContext();
 // Read and relocate an opcode
-static Opcode:ReadOpcode(address);
+static stock Opcode:ReadOpcode(address);
 // Read the operand for the current opcode, assuming it has one
-static ReadOperand(address, end = 0);
+static stock ReadOperand(address, end = 0);
 // Write an opcode and its operand (if it has one)
-static WriteOpcode(address, Opcode:opcode, operand = 0);
+static stock WriteOpcode(address, Opcode:opcode, operand = 0);
 // Write an operand
-static WriteOperand(address, operand);
+static stock WriteOperand(address, operand);
 // Find and store the next opcode
-static FindNextOpcode(&address, &Opcode:opcode, end = 0);
+static stock FindNextOpcode(&address, &Opcode:opcode, end = 0);
 // Find a specific opcode
 // Modifies address only on success
-static FindOpcode(&address, Opcode:opcode, end = 0);
+static stock FindOpcode(&address, Opcode:opcode, end = 0);
 // Find a specific opcode and operand pair
 // Modifies address only on success
-static FindOpcodeWithOperand(&address, Opcode:opcode, operand, end = 0);
+static stock FindOpcodeWithOperand(&address, Opcode:opcode, operand, end = 0);
 
 stock TryStart(frm, stk, try_idx) {
 	e_assert g_@eInitialized;
@@ -332,7 +332,7 @@ stock ThrowError(const message[], code = -1) {
 	}
 }
 
-static ReturnHook(retval) {
+static stock ReturnHook(retval) {
 	e_assert g_@eInitialized;
 	e_assert s_CTX > -1;
 	
@@ -373,7 +373,7 @@ static ReturnHook(retval) {
 	return 0;
 }
 
-static JumpToContext(_cip, pop = false) {
+static stock JumpToContext(_cip, pop = false) {
 	e_assert g_@eInitialized;
 	e_assert s_CTX > -1;
 	
@@ -399,7 +399,7 @@ static JumpToContext(_cip, pop = false) {
 	#emit SCTRL 6
 }
 
-static DoReturn(_retval) {
+static stock DoReturn(_retval) {
 	e_assert g_@eInitialized;
 	e_assert s_CTX > -1;
 	
@@ -610,7 +610,7 @@ stock InitExceptions() {
 	}
 }
 
-static Opcode:ReadOpcode(address) {
+static stock Opcode:ReadOpcode(address) {
 	new Opcode:opcode = Opcode:ReadAmxMemory(address);
 	opcode = UnrelocateOpcode(opcode);
 	
@@ -620,14 +620,14 @@ static Opcode:ReadOpcode(address) {
 	return opcode;
 }
 
-static ReadOperand(address, end = 0) {
+static stock ReadOperand(address, end = 0) {
 	e_assert sc_OpcodeOperands[ReadOpcode(address)] == 1;
 	e_assert address + 4 < end;
 	
 	return ReadAmxMemory(address + 4);
 }
 
-static WriteOpcode(address, Opcode:opcode, operand = 0) {
+static stock WriteOpcode(address, Opcode:opcode, operand = 0) {
 	// Are we dealing with a valid opcode?
 	e_assert _:OP_NONE <= _:opcode < NUM_OPCODES;
 	e_assert sc_OpcodeOperands[opcode] != -1;
@@ -648,13 +648,13 @@ static WriteOpcode(address, Opcode:opcode, operand = 0) {
 	}
 }
 
-static WriteOperand(address, operand) {
+static stock WriteOperand(address, operand) {
 	e_assert sc_OpcodeOperands[ReadOpcode(address)] == 1;
 	
 	WriteAmxMemory(address + 4, operand);
 }
 
-static FindNextOpcode(&address, &Opcode:opcode, end = 0) {
+static stock FindNextOpcode(&address, &Opcode:opcode, end = 0) {
 	new Opcode:current_opcode = ReadOpcode(address);
 	new start_address = address;
 	
@@ -688,7 +688,7 @@ static FindNextOpcode(&address, &Opcode:opcode, end = 0) {
 	return 1;
 }
 
-static FindOpcode(&address, Opcode:opcode, end = 0) {
+static stock FindOpcode(&address, Opcode:opcode, end = 0) {
 	new start_address = address;
 	new Opcode:current_opcode;
 	
@@ -704,7 +704,7 @@ static FindOpcode(&address, Opcode:opcode, end = 0) {
 	return 0;
 }
 
-static FindOpcodeWithOperand(&address, Opcode:opcode, operand, end = 0) {
+static stock FindOpcodeWithOperand(&address, Opcode:opcode, operand, end = 0) {
 	new start_address = address;
 	
 	while (FindOpcode(address, opcode, end)) {
@@ -719,7 +719,7 @@ static FindOpcodeWithOperand(&address, Opcode:opcode, operand, end = 0) {
 	return 0;
 }
 
-static PushContext() {
+static stock PushContext() {
 	e_assert s_CTX >= -1;
 	
 	s_CTX++;
@@ -727,7 +727,7 @@ static PushContext() {
 	e_assert s_CTX < MAX_CONTEXT_STACK;
 }
 
-static PopContext() {
+static stock PopContext() {
 	e_assert s_CTX > -1;
 	
 	s_CTX--;
