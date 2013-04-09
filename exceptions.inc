@@ -326,9 +326,16 @@ stock ThrowError(const message[], code = -1) {
 			exit;
 		}
 	} else {
-		s_HasException = true;
+		new pop = false;
 		
-		JumpToContext(s_TryStatements[try_idx][Try_End]);
+		if (!s_TryStatements[try_idx][HasCatch] && !s_TryStatements[try_idx][HasFinally]) {
+			pop = true;
+			s_HasException = false;
+		} else {
+			s_HasException = true;
+		}
+		
+		JumpToContext(s_TryStatements[try_idx][Try_End], pop);
 	}
 }
 
