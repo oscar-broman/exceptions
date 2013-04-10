@@ -337,6 +337,13 @@ stock ThrowError(const message[], code = -1) {
 	e_assert g_@eInitialized;
 	e_assert s_CTX >= -1;
 	
+	if (s_CTX > -1) {
+		// Was the error thrown in catch/finally?
+		if (s_ContextStack[s_CTX][CurrentBlock] != CurrentBlockTry) {
+			PopContext();
+		}
+	}
+	
 	new try_idx = s_ContextStack[s_CTX][TryIdx];
 	
 	e_assert 0 <= try_idx < s_NumTryStatements;
