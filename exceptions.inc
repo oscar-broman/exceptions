@@ -49,6 +49,22 @@
 #define finally \
 	if (_@eFINALLY_MAGIC | _@eTRUE) for (new __f = FinallyStart(); __f; FinallyEnd(), __f = 0)
 
+// Give each variable a unique value
+#define UniqueErrorCode<%1> \
+	%1;                     \
+	@_eC%1(v, n[32]);       \
+	@_eC%1(v, n[32]) {      \
+		%1 = %1 | v;        \
+		strpack(n, !#%1);   \
+	} _@eCEND0:_@eCEND1:
+
+// Allow for multiple declarations
+#define _@eCEND0:_@eCEND1:%1, \
+		stock
+
+// End of declarations? Put this to swallow the semicolon
+#define _@eCEND1: \
+		_@eNULL()
 
 // Used to distinguish the statements among AMX instructions
 const _@eTRY_MAGIC1    = 0x026A57FD;
@@ -149,6 +165,8 @@ stock CatchEnd();
 stock FinallyStart();
 // Invoked after finally
 stock FinallyEnd();
+// Get the name of a UniqueErrorCode
+stock GetErrorCodeName(code, bool:pack = false);
 // Getter for s_CTX
 stock GetTryStackIndex();
 // Create and throw an exception
@@ -297,6 +315,20 @@ stock FinallyEnd() {
 	return 1;
 }
 
+stock GetErrorCodeName(code, bool:pack = false) {
+	new name[32];
+	
+	new func = GetPublicAddressFromIndex(code);
+	
+	CallFunction(func, code, ref(name));
+	
+	if (!pack) {
+		strunpack(name, name);
+	}
+	
+	return name;
+}
+
 stock GetTryStackIndex() {
 	return s_CTX;
 }
@@ -438,6 +470,15 @@ stock InitExceptions() {
 	e_assert !g_@eInitialized;
 	
 	g_@eInitialized = true;
+	
+	// Find all UniqueErrorCode init functions and invoke them
+	for (new idx = 0, name[32]; GetPublicNameFromIndex(idx, name); idx++) {
+		if (strcmp(!"@_eC", name, false, 4) == 0) {
+			new func = GetPublicAddressFromIndex(idx);
+			
+			CallFunction(func, idx, ref(name));
+		}
+	}
 	
 	// Gather some info about the AMX
 	new hdr[AMX_HDR], base, cod, dat;
