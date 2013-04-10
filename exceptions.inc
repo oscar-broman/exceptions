@@ -49,6 +49,17 @@
 #define finally \
 	if (_@eFINALLY_MAGIC | _@eTRUE) for (new __f = FinallyStart(); __f; FinallyEnd(), __f = 0)
 
+stock _@eTHROW1, _@eTHROW2;
+
+#define throw \
+	_@eTHROW1||_@eTHROW2||
+
+#define _@eTHROW1||_@eTHROW2||%1new%2Error%3( \
+	ThrowError(
+
+#define _@eTHROW2||%1; \
+	ThrowException(%1);
+
 // Give each variable a unique value
 #define UniqueErrorCode<%1> \
 	%1;                     \
@@ -171,6 +182,8 @@ stock GetErrorCodeName(code, bool:pack = false);
 stock GetTryStackIndex();
 // Create and throw an exception
 stock ThrowError(const message[], code = -1);
+// Throw an existing exception
+stock ThrowException(e[E_EXCEPTION]);
 // Called when an exception happens outside of try
 forward OnUncaughtException(e[E_EXCEPTION]);
 // Used when hooking return statements
@@ -376,6 +389,10 @@ stock ThrowError(const message[], code = -1) {
 		
 		JumpToContext(s_TryStatements[try_idx][Try_End], pop);
 	}
+}
+
+stock ThrowException(e[E_EXCEPTION]) {
+	ThrowError(e[Message], e[Code]);
 }
 
 static stock ReturnHook(retval) {
